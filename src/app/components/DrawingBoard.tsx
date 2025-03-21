@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Stage, Layer, Line, Image as KonvaImage, Rect, Circle as KonvaCircle, RegularPolygon, Group } from 'react-konva';
+import { Stage, Layer, Line, Image as KonvaImage, Rect, Circle, RegularPolygon, Group } from 'react-konva';
+import Konva from 'konva';
 import {
   Eraser,
   Trash2,
@@ -15,7 +16,6 @@ import {
   Loader2,
   Eye,
   EyeOff,
-  Circle,
   Square,
   Triangle,
   Brush,
@@ -40,36 +40,52 @@ import {
   Save,
   Shapes,
   Hexagon,
-  MoreVertical
+  MoreVertical,
+  Circle as CircleIcon,
+  Sparkles,
+  Pencil
 } from 'lucide-react';
-import Konva from 'konva';
 import Image from 'next/image';
+import { KonvaEventObject } from 'konva/lib/Node';
 
 interface DrawingBoardProps {
-  isDarkMode?: boolean;
-  onToggleDarkMode?: () => void;
+  isDarkMode: boolean;
+  onToggleDarkMode: () => void;
 }
 
-interface LineType {
-  tool: 'brush' | 'eraser' | 'circle' | 'square' | 'triangle' | 'hexagon' | 'bucket';
+// Define tool types
+type DrawingTool = 'pen' | 'eraser' | 'brush';
+type ShapeTool = 'circle' | 'square' | 'triangle' | 'hexagon';
+type Tool = DrawingTool | ShapeTool;
+
+const isDrawingTool = (tool: Tool): tool is DrawingTool => {
+  return tool === 'pen' || tool === 'eraser' || tool === 'brush';
+};
+
+const isShapeTool = (tool: Tool): tool is ShapeTool => {
+  return tool === 'circle' || tool === 'square' || tool === 'triangle' || tool === 'hexagon';
+};
+
+interface DrawingLine {
+  tool: DrawingTool;
   points: number[];
   color: string;
   strokeWidth: number;
+}
+
+interface ShapeType {
+  tool: ShapeTool;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  strokeWidth: number;
   shapeProps?: {
-    x: number;
-    y: number;
-    width?: number;
-    height?: number;
     radius?: number;
     sides?: number;
     points?: number[];
   };
-  fill?: string;
-}
-
-interface Point {
-  x: number;
-  y: number;
 }
 
 const DRAWING_TIPS = [
@@ -148,11 +164,11 @@ const ShareMenu = ({ imageUrl, onClose }: ShareMenuProps) => {
   };
 
   return (
-    <div className="fixed top-16 right-4 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-50 scale-[0.8] origin-top-right">
+    <div className="fixed inset-x-4 bottom-20 lg:bottom-auto lg:inset-x-auto lg:top-16 lg:right-4 w-auto lg:w-48 rounded-lg shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-[102] scale-[0.8] origin-bottom lg:origin-top-right">
       <div className="py-1">
         <button
           onClick={() => downloadAndShare('twitter')}
-          className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+          className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 first:rounded-t-lg"
         >
           <Twitter className="w-4 h-4 mr-2" />
           Twitter/X
@@ -173,7 +189,7 @@ const ShareMenu = ({ imageUrl, onClose }: ShareMenuProps) => {
         </button>
         <button
           onClick={() => downloadAndShare('threads')}
-          className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+          className="flex items-center w-full px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 last:rounded-b-lg"
         >
           <MessageCircle className="w-4 h-4 mr-2" />
           Threads
@@ -195,19 +211,16 @@ const SKETCH_CATEGORIES = [
 
 type CategoryId = typeof SKETCH_CATEGORIES[number]['id'];
 
-// Update tools array to use Droplet icon instead of Bucket
 const TOOLS = [
-  { id: 'brush', icon: Brush, label: 'Brush' },
-  { id: 'eraser', icon: Eraser, label: 'Eraser' },
-  { id: 'bucket', icon: Droplet, label: 'Paint Bucket' }
+  { id: 'pen' as const, icon: Pencil, label: 'Pen' },
+  { id: 'eraser' as const, icon: Eraser, label: 'Eraser' }
 ] as const;
 
-// Add shapes array
 const SHAPES = [
-  { id: 'circle', icon: Circle, label: 'Circle' },
-  { id: 'square', icon: Square, label: 'Square' },
-  { id: 'triangle', icon: Triangle, label: 'Triangle' },
-  { id: 'hexagon', icon: Hexagon, label: 'Hexagon' }
+  { id: 'circle' as const, icon: CircleIcon, label: 'Circle' },
+  { id: 'square' as const, icon: Square, label: 'Square' },
+  { id: 'triangle' as const, icon: Triangle, label: 'Triangle' },
+  { id: 'hexagon' as const, icon: Hexagon, label: 'Hexagon' }
 ] as const;
 
 const COLORS = [
@@ -232,14 +245,29 @@ type AnimationCategoryId = typeof ANIMATION_CATEGORIES[number]['id'];
 type KonvaEvent = Konva.KonvaEventObject<MouseEvent>;
 type KonvaTouchEvent = Konva.KonvaEventObject<TouchEvent>;
 
-const DrawingBoard: React.FC<DrawingBoardProps> = () => {
+type LineType = DrawingLine | ShapeType;
+
+interface HistoryState {
+  lines: LineType[];
+}
+
+interface Point {
+  x: number;
+  y: number;
+}
+
+const DrawingBoard: React.FC<DrawingBoardProps> = ({ isDarkMode, onToggleDarkMode }) => {
   const [lines, setLines] = useState<LineType[]>([]);
-  const [history, setHistory] = useState<LineType[][]>([[]]);
+  const [history, setHistory] = useState<HistoryState[]>([{ lines: [] }]);
   const [currentStep, setCurrentStep] = useState(0);
+  const [currentLine, setCurrentLine] = useState<DrawingLine | null>(null);
+  const [currentShape, setCurrentShape] = useState<ShapeType | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [tool, setTool] = useState<'brush' | 'eraser' | 'circle' | 'square' | 'triangle' | 'hexagon' | 'bucket'>('brush');
-  const [brushSize, setBrushSize] = useState(5);
+  const [tool, setTool] = useState<Tool>('pen');
   const [color, setColor] = useState('#000000');
+  const [strokeWidth, setStrokeWidth] = useState(2);
+  const [brushSize, setBrushSize] = useState(2);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const [guideImage, setGuideImage] = useState<string | null>(null);
   const [isLoadingGuide, setIsLoadingGuide] = useState(false);
   const [showOverlay, setShowOverlay] = useState(false);
@@ -258,9 +286,7 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [guideImageObj, setGuideImageObj] = useState<HTMLImageElement | null>(null);
-  const [fillColor, setFillColor] = useState<string>('#ffffff');
   const [showFillPicker, setShowFillPicker] = useState<boolean>(false);
-  const [useFill, setUseFill] = useState<boolean>(false);
   const [selectedCategory, setSelectedCategory] = useState<CategoryId>('shonen');
   const [showAnimeCategories, setShowAnimeCategories] = useState(false);
   const [guideMode, setGuideMode] = useState<'generate' | 'upload' | null>(null);
@@ -275,7 +301,6 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
     gif?: string;
   }>({});
   const [canRedo, setCanRedo] = useState(false);
-  const [currentLine, setCurrentLine] = useState<LineType | null>(null);
   const [canUndo, setCanUndo] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [showAnimationCategories, setShowAnimationCategories] = useState(false);
@@ -286,6 +311,8 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
   const [showShapesDropdown, setShowShapesDropdown] = useState(false);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [showBackground, setShowBackground] = useState(false);
+  const [showGuidePanel, setShowGuidePanel] = useState(false);
+  const [shapes, setShapes] = useState<ShapeType[]>([]);
 
   useEffect(() => {
     isDrawingRef.current = isDrawing;
@@ -360,18 +387,56 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
     const targetShape = shapes.find((shape: any) => {
       const pos = shape.getAbsolutePosition();
       const size = shape.getSize();
-      return (
-        x >= pos.x &&
-        x <= pos.x + size.width &&
-        y >= pos.y &&
-        y <= pos.y + size.height
-      );
+      const radius = shape.radius;
+      
+      if (shape instanceof Konva.Circle) {
+        const dx = x - (pos.x + radius);
+        const dy = y - (pos.y + radius);
+        return dx * dx + dy * dy <= radius * radius;
+      }
+      
+      if (shape instanceof Konva.Rect) {
+        return (
+          x >= pos.x &&
+          x <= pos.x + size.width &&
+          y >= pos.y &&
+          y <= pos.y + size.height
+        );
+      }
+      
+      if (shape instanceof Konva.Line && shape.closed()) {
+        const points = shape.points();
+        return isPointInPolygon(x, y, points);
+      }
+      
+      if (shape instanceof Konva.RegularPolygon) {
+        const centerX = pos.x + radius;
+        const centerY = pos.y + radius;
+        const dx = x - centerX;
+        const dy = y - centerY;
+        return dx * dx + dy * dy <= radius * radius;
+      }
+      
+      return false;
     });
 
     if (targetShape) {
       // If we found a shape, fill it
-      targetShape.fill(replacementColor);
-      layer.batchDraw();
+      if (targetShape instanceof Konva.Circle || targetShape instanceof Konva.RegularPolygon) {
+        // For circles and hexagons, create a new shape with the fill color
+        const newShape = targetShape.clone({
+          fill: replacementColor,
+          stroke: replacementColor,
+          strokeWidth: targetShape.strokeWidth(),
+          listening: false
+        });
+        layer.add(newShape);
+        layer.batchDraw();
+      } else {
+        // For other shapes, use the existing fill method
+        targetShape.fill(replacementColor);
+        layer.batchDraw();
+      }
     } else {
       // If no shape found, create a new filled rectangle
       const rect = new Konva.Rect({
@@ -389,147 +454,171 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
     }
   };
 
-  // Update handleMouseDown
-  const handleMouseDown = (e: KonvaEvent) => {
-    setIsDrawing(true);
-    const stage = e.target.getStage();
-    if (!stage) return;
-    
-    const point = stage.getPointerPosition();
-    if (!point) return;
-    
-    if (tool === 'brush' || tool === 'eraser') {
-      const newLine = {
-        points: [point.x, point.y],
-        color,
-        strokeWidth: brushSize,
-        tool
+  // Helper function to check if a point is inside a polygon
+  const isPointInPolygon = (x: number, y: number, points: number[]): boolean => {
+    let inside = false;
+    for (let i = 0, j = points.length - 2; i < points.length; i += 2, j = i - 2) {
+      const xi = points[i];
+      const yi = points[i + 1];
+      const xj = points[j];
+      const yj = points[j + 1];
+      
+      if (((yi > y) !== (yj > y)) &&
+          (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  };
+
+  const isDrawingLine = (line: LineType): line is DrawingLine => {
+    return isDrawingTool(line.tool);
+  };
+
+  const isShapeLine = (line: LineType): line is ShapeType => {
+    return isShapeTool(line.tool);
+  };
+
+  // Update handleMouseDown function
+  const handleMouseDown = (e: KonvaEventObject<MouseEvent>) => {
+    const pos = e.target.getStage()?.getPointerPosition();
+    if (!pos) return;
+
+    if (isDrawingTool(tool)) {
+      setIsDrawing(true);
+      const newLine: LineType = {
+        tool,
+        points: [pos.x, pos.y],
+        color: tool === 'eraser' ? '#ffffff' : color,
+        strokeWidth: strokeWidth,
       };
       setLines([...lines, newLine]);
-    } else if (tool === 'bucket') {
-      floodFill(stage, point.x, point.y, '#ffffff', color);
-      setIsDrawing(false);
-    } else {
-      setStartPoint({ x: point.x, y: point.y });
-    }
-  };
-
-  // Update handleMouseMove
-  const handleMouseMove = (e: KonvaEvent) => {
-    if (!isDrawing) return;
-
-    const stage = e.target.getStage();
-    if (!stage) return;
-    
-    const point = stage.getPointerPosition();
-    if (!point) return;
-
-    if (tool === 'brush' || tool === 'eraser') {
-      const lastLine = lines[lines.length - 1];
-      const newLine = {
-        ...lastLine,
-        points: lastLine.points.concat([point.x, point.y])
+    } else if (isShapeTool(tool)) {
+      setIsDrawing(true);
+      const newShape: ShapeType = {
+        tool: tool as ShapeTool,
+        x: pos.x,
+        y: pos.y,
+        width: 0,
+        height: 0,
+        color,
+        strokeWidth: strokeWidth,
       };
-      lines.splice(lines.length - 1, 1, newLine);
-      setLines([...lines]);
-    } else if (tool === 'bucket') {
-      floodFill(stage, point.x, point.y, '#ffffff', color);
-    } else if (startPoint) {
-      const width = point.x - startPoint.x;
-      const height = point.y - startPoint.y;
-      const radius = Math.sqrt(width * width + height * height) / 2;
-      
-      let shapeProps;
-      switch (tool) {
-        case 'circle':
-          shapeProps = {
-            x: startPoint.x,
-            y: startPoint.y,
-            radius
-          };
-          break;
-        case 'square':
-          const size = Math.max(Math.abs(width), Math.abs(height));
-          shapeProps = {
-            x: startPoint.x,
-            y: startPoint.y,
-            width: size,
-            height: size
-          };
-          break;
-        case 'triangle':
-          const triangleBase = Math.abs(width);
-          const triangleHeight = Math.abs(height);
-          const trianglePoints = [
-            startPoint.x, startPoint.y, // Top point
-            startPoint.x + triangleBase, startPoint.y + triangleHeight, // Bottom right
-            startPoint.x - triangleBase, startPoint.y + triangleHeight  // Bottom left
-          ];
-          shapeProps = {
-            points: trianglePoints,
-            x: startPoint.x,
-            y: startPoint.y,
-            width: triangleBase * 2,
-            height: triangleHeight
-          };
-          break;
-        case 'hexagon':
-          shapeProps = {
-            x: startPoint.x,
-            y: startPoint.y,
-            radius,
-            sides: 6
-          };
-          break;
-      }
-      setShape({ type: tool, ...shapeProps });
+      setShapes([...shapes, newShape]);
     }
   };
 
-  // Update handleMouseUp
+  // Update handleMouseMove function
+  const handleMouseMove = (e: KonvaEventObject<MouseEvent>) => {
+    const pos = e.target.getStage()?.getPointerPosition();
+    if (!pos || !isDrawing) return;
+
+    if (isDrawingTool(tool)) {
+      const lastLine = lines[lines.length - 1];
+      if (!lastLine || !isDrawingLine(lastLine)) return;
+
+      const newPoints = [...lastLine.points, pos.x, pos.y];
+      const updatedLines = [...lines];
+      updatedLines[lines.length - 1] = {
+        ...lastLine,
+        points: newPoints,
+      };
+      setLines(updatedLines);
+    } else if (isShapeTool(tool)) {
+      const lastShape = shapes[shapes.length - 1];
+      if (!lastShape) return;
+
+      const updatedShapes = [...shapes];
+      updatedShapes[shapes.length - 1] = {
+        ...lastShape,
+        width: pos.x - lastShape.x,
+        height: pos.y - lastShape.y,
+      };
+      setShapes(updatedShapes);
+    }
+  };
+
+  // Update handleMouseUp function
   const handleMouseUp = () => {
-    if (tool === 'bucket') {
+    if (isDrawing) {
       setIsDrawing(false);
-      return;
+      if (tool === 'brush' || tool === 'eraser') {
+        const newLine: LineType = {
+          points: currentLine?.points || [],
+          color,
+          strokeWidth: strokeWidth,
+          tool
+        };
+        const newLines = [...lines, newLine];
+        setLines(newLines);
+        
+        // Update history with the new state
+        const newHistory = [...history.slice(0, currentStep + 1), { lines: newLines }];
+        setHistory(newHistory);
+        setCurrentStep(newHistory.length - 1);
+      } else if (tool === 'circle' || tool === 'square' || tool === 'triangle' || tool === 'hexagon') {
+        handleShapeComplete();
+      }
+      setCurrentLine(null);
     }
-    setIsDrawing(false);
-    handleShapeComplete();
-    
-    if (lines.length > 0 && !shape) {
-      const newHistory = [...history.slice(0, currentStep + 1), [...lines]];
+  };
+
+  // Update handleShapeComplete function
+  const handleShapeComplete = () => {
+    if (shape && startPoint) {
+      const newLine: LineType = {
+        tool: shape.type,
+        points: [],
+        color,
+        strokeWidth: strokeWidth,
+      };
+      const newLines = [...lines, newLine];
+      setLines(newLines);
+      
+      // Update history with the new state
+      const newHistory = [...history.slice(0, currentStep + 1), { lines: newLines }];
       setHistory(newHistory);
-      setCurrentStep(currentStep + 1);
+      setCurrentStep(newHistory.length - 1);
+      
+      setShape(null);
+      setStartPoint(null);
     }
   };
 
+  // Update handleClear function
   const handleClear = () => {
-    const newHistory = [...history.slice(0, currentStep + 1), []];
-    setHistory(newHistory);
-    setCurrentStep(currentStep + 1);
-    setLines([]);
-  };
-
-  const handleReset = () => {
     if (window.confirm('Are you sure you want to clear the canvas? This action cannot be undone.')) {
-      setLines([]);
-      setHistory([[]]);
+      const emptyLines: LineType[] = [];
+      setLines(emptyLines);
+      setHistory([{ lines: emptyLines }]);
       setCurrentStep(0);
     }
   };
 
+  // Update handleUndo function
   const handleUndo = () => {
-    if (currentStep > 0 && history.length > 1) {
+    if (currentStep > 0) {
       const newStep = currentStep - 1;
       setCurrentStep(newStep);
-      setLines([...history[newStep]]);
+      setLines([...history[newStep].lines]);
     }
   };
 
+  // Update handleRedo function
   const handleRedo = () => {
     if (currentStep < history.length - 1) {
       const newStep = currentStep + 1;
       setCurrentStep(newStep);
-      setLines([...history[newStep]]);
+      setLines([...history[newStep].lines]);
+    }
+  };
+
+  const handleReset = () => {
+    if (window.confirm('Are you sure you want to clear the canvas? This action cannot be undone.')) {
+      const emptyLines: LineType[] = [];
+      setLines(emptyLines);
+      setHistory([{ lines: emptyLines }]);
+      setCurrentStep(0);
     }
   };
 
@@ -768,79 +857,76 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
     return { width: scaledWidth, height: scaledHeight, x, y };
   };
 
-  const handleShapeComplete = () => {
-    if (shape && startPoint) {
-      const newLine: LineType = {
-        tool: shape.type,
-        points: [],
-        color,
-        strokeWidth: brushSize,
-        shapeProps: shape,
-        fill: useFill ? fillColor : undefined
-      };
-      setLines([...lines, newLine]);
-      
-      const newHistory = [...history.slice(0, currentStep + 1), [...lines, newLine]];
-      setHistory(newHistory);
-      setCurrentStep(newHistory.length - 1);
-      
-      setShape(null);
-      setStartPoint(null);
-    }
-  };
-
   // Update shape rendering in the Layer component
   const renderShape = (line: LineType) => {
-    const { tool, color, strokeWidth, shapeProps, fill } = line;
-    if (!shapeProps) return null;
+    if (isDrawingLine(line)) {
+      return (
+        <Line
+          key={line.points.join(',')}
+          points={line.points}
+          stroke={line.color}
+          strokeWidth={line.strokeWidth}
+          tension={0.5}
+          lineCap="round"
+          lineJoin="round"
+          globalCompositeOperation={
+            line.tool === 'eraser' ? 'destination-out' : 'source-over'
+          }
+        />
+      );
+    }
 
-    const commonProps = {
-      stroke: color,
-      strokeWidth: strokeWidth,
-      fill: fill || (useFill ? fillColor : 'transparent'),
-    };
-
-    switch (tool) {
-      case 'circle':
-        return (
-          <KonvaCircle
-            {...commonProps}
-            x={shapeProps.x || 0}
-            y={shapeProps.y || 0}
-            radius={shapeProps.radius || 0}
-          />
-        );
-      case 'square':
-        return (
-          <Rect
-            {...commonProps}
-            x={shapeProps.x || 0}
-            y={shapeProps.y || 0}
-            width={shapeProps.width || 0}
-            height={shapeProps.height || 0}
-          />
-        );
-      case 'triangle':
-        return (
-          <Line
-            {...commonProps}
-            points={shapeProps.points || []}
-            closed={true}
-            tension={0}
-          />
-        );
-      case 'hexagon':
-        return (
-          <RegularPolygon
-            {...commonProps}
-            x={shapeProps.x || 0}
-            y={shapeProps.y || 0}
-            radius={shapeProps.radius || 0}
-            sides={6}
-          />
-        );
-      default:
-        return null;
+    if (isShapeLine(line)) {
+      const { tool, x, y, width, height, color, strokeWidth } = line;
+      switch (tool) {
+        case 'circle':
+          return (
+            <Circle
+              key={`${x},${y},${width},${height}`}
+              x={x + width / 2}
+              y={y + height / 2}
+              radius={Math.abs(width) / 2}
+              stroke={color}
+              strokeWidth={strokeWidth}
+            />
+          );
+        case 'square':
+          return (
+            <Rect
+              key={`${x},${y},${width},${height}`}
+              x={x}
+              y={y}
+              width={width}
+              height={height}
+              stroke={color}
+              strokeWidth={strokeWidth}
+            />
+          );
+        case 'triangle':
+          return (
+            <RegularPolygon
+              key={`${x},${y},${width},${height}`}
+              x={x + width / 2}
+              y={y + height / 2}
+              sides={3}
+              radius={Math.abs(width) / 2}
+              stroke={color}
+              strokeWidth={strokeWidth}
+            />
+          );
+        case 'hexagon':
+          return (
+            <RegularPolygon
+              key={`${x},${y},${width},${height}`}
+              x={x + width / 2}
+              y={y + height / 2}
+              sides={6}
+              radius={Math.abs(width) / 2}
+              stroke={color}
+              strokeWidth={strokeWidth}
+            />
+          );
+      }
     }
   };
 
@@ -910,13 +996,17 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
 
       const data = await response.json();
       
+      if (!data.success) {
+        throw new Error(data.error || 'Animation failed');
+      }
+
       // Set the preview and formats
       setAnimationPreview(data.preview);
       setAnimationFormats(data.formats);
+      setAnimationUrl(data.preview);
       
       // Show the preview modal
       setShowAnimationPreview(true);
-      setAnimationUrl(data.preview);
     } catch (error) {
       console.error('Animation error:', error);
       alert('Failed to animate drawing. Please try again.');
@@ -1040,88 +1130,136 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
   };
 
   // Update handleTouchStart
-  const handleTouchStart = (e: KonvaTouchEvent) => {
-    if (!e.target || !e.target.getStage) return;
-    
-    const stage = e.target.getStage();
-    if (!stage) return;
+  const handleTouchStart = (e: KonvaEventObject<TouchEvent>) => {
+    e.evt.preventDefault();
+    const touch = e.evt.touches[0];
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
 
-    const point = stage.getPointerPosition();
-    if (!point) return;
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
 
-    if (tool === 'brush' || tool === 'eraser') {
-      isDrawingRef.current = true;
-      setLines([...lines, { tool, points: [point.x, point.y], color, strokeWidth: brushSize }]);
-    } else if (tool === 'circle' || tool === 'square') {
-      setStartPoint({ x: point.x, y: point.y });
-      setShape({ tool, x: point.x, y: point.y, color, strokeWidth: brushSize });
+    if (isDrawingTool(tool)) {
+      setIsDrawing(true);
+      const newLine: DrawingLine = {
+        tool,
+        points: [x, y],
+        color: tool === 'eraser' ? '#FFFFFF' : color,
+        strokeWidth: tool === 'eraser' ? 20 : strokeWidth
+      };
+      setCurrentLine(newLine);
+    } else if (isShapeTool(tool)) {
+      setIsDrawing(true);
+      const newShape: ShapeType = {
+        tool,
+        x,
+        y,
+        width: 0,
+        height: 0,
+        color,
+        strokeWidth: strokeWidth
+      };
+      setCurrentShape(newShape);
     }
   };
 
   // Update handleTouchMove
-  const handleTouchMove = (e: KonvaTouchEvent) => {
-    if (!e.target || !e.target.getStage) return;
-    
-    const stage = e.target.getStage();
-    if (!stage) return;
+  const handleTouchMove = (e: KonvaEventObject<TouchEvent>) => {
+    e.evt.preventDefault();
+    if (!isDrawing) return;
 
-    const point = stage.getPointerPosition();
-    if (!point) return;
+    const touch = e.evt.touches[0];
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
 
-    if ((tool === 'brush' || tool === 'eraser') && isDrawingRef.current) {
-      const lastLine = lines[lines.length - 1];
-      if (!lastLine) return;
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
 
-      const newPoints = [...lastLine.points, point.x, point.y];
-      const newLines = [...lines];
-      newLines[lines.length - 1].points = newPoints;
-      setLines(newLines);
-    } else if ((tool === 'circle' || tool === 'square') && startPoint && shape) {
-      const width = point.x - startPoint.x;
-      const height = point.y - startPoint.y;
-      setShape({
-        ...shape,
-        width: Math.abs(width),
-        height: Math.abs(height),
-        x: width < 0 ? point.x : startPoint.x,
-        y: height < 0 ? point.y : startPoint.y
+    if (isDrawingTool(tool)) {
+      setCurrentLine(prev => {
+        if (!prev || !isDrawingLine(prev)) return null;
+        return {
+          ...prev,
+          points: [...prev.points, x, y]
+        };
+      });
+    } else if (isShapeTool(tool)) {
+      setCurrentShape(prev => {
+        if (!prev || !isShapeLine(prev)) return null;
+        return {
+          ...prev,
+          width: x - prev.x,
+          height: y - prev.y
+        };
       });
     }
   };
 
-  const handleTouchEnd = (e: KonvaTouchEvent) => {
-    if (tool === 'brush' || tool === 'eraser') {
-      isDrawingRef.current = false;
-      if (lines.length > 0) {
-        const newHistory = history.slice(0, currentStep + 1);
-        newHistory.push([...lines]);
-        setHistory(newHistory);
-        setCurrentStep(newHistory.length - 1);
-      }
-    } else if ((tool === 'circle' || tool === 'square') && shape) {
-      const newLines = [...lines, { ...shape }];
-      setLines(newLines);
-      setShape(null);
-      setStartPoint(null);
+  const handleTouchEnd = () => {
+    if (!isDrawing) return;
 
-      const newHistory = history.slice(0, currentStep + 1);
-      newHistory.push(newLines);
-      setHistory(newHistory);
-      setCurrentStep(newHistory.length - 1);
+    const newHistory = history.slice(0, currentStep + 1);
+    const newStep = currentStep + 1;
+
+    if (isDrawingTool(tool)) {
+      if (currentLine && isDrawingLine(currentLine)) {
+        const newLines = [...lines, currentLine];
+        setLines(newLines);
+        const updatedHistory: HistoryState[] = [...newHistory, { lines: newLines }];
+        setHistory(updatedHistory);
+        setCurrentStep(newStep);
+        setCurrentLine(null);
+      }
+    } else if (isShapeTool(tool)) {
+      if (currentShape && isShapeLine(currentShape)) {
+        const newLines = [...lines, currentShape];
+        setLines(newLines);
+        const updatedHistory: HistoryState[] = [...newHistory, { lines: newLines }];
+        setHistory(updatedHistory);
+        setCurrentStep(newStep);
+        setCurrentShape(null);
+      }
     }
+
+    setIsDrawing(false);
   };
 
+  // Add useEffect for keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Check if the target is an input or textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      // Undo: Cmd/Ctrl + Z
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+      }
+      
+      // Redo: Cmd/Ctrl + Shift + Z or Cmd/Ctrl + Y
+      if ((e.metaKey || e.ctrlKey) && ((e.key === 'z' && e.shiftKey) || e.key === 'y')) {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentStep, history.length]); // Add dependencies that the handlers use
+
   return (
-    <div className="relative min-h-screen w-full bg-gray-200">
+    <div className="min-h-screen w-full bg-gray-200">
       <div className="flex flex-col min-h-screen">
-        <div className="mx-auto px-2 sm:px-4 lg:px-6 py-3 sm:py-6 flex-1">
+        <div className="flex-1 px-2 sm:px-4 lg:px-6 py-2 sm:py-6">
           {/* Responsive Container */}
-          <div className="max-w-[1024px] w-full mx-auto">
-            {/* Unified Top Navigation */}
-            <div className="mb-3 sm:mb-6 p-2 sm:p-3 rounded-lg shadow-lg bg-gray-50">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3">
+          <div className="max-w-[1024px] w-full mx-auto h-full flex flex-col">
+            {/* Unified Top Navigation - Fixed height */}
+            <div className="mb-2 sm:mb-6 p-2 sm:p-3 rounded-lg shadow-lg bg-gray-50">
+              <div className="flex items-center justify-between gap-2 sm:gap-3">
                 {/* Left Section: Logo and Drawing Tools */}
-                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                <div className="flex items-center gap-2 sm:gap-3">
                   <h1 className="text-lg sm:text-xl font-bold font-outfit text-gray-900">
                     SketchToon
                   </h1>
@@ -1132,35 +1270,35 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                       <button
                         key={toolItem.id}
                         onClick={() => setTool(toolItem.id)}
-                        className={`p-2 rounded-full transition-colors ${
+                        className={`p-1.5 sm:p-2 rounded-full transition-colors ${
                           tool === toolItem.id
                             ? 'bg-[#fb8500] text-white'
                             : 'hover:bg-gray-100 text-gray-800'
                         }`}
                         title={toolItem.label}
                       >
-                        <toolItem.icon className="w-4 h-4" />
+                        <toolItem.icon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       </button>
                     ))}
                     <div className="relative">
                       <button
                         onClick={() => setShowShapesDropdown(!showShapesDropdown)}
-                        className={`p-2 rounded-full transition-colors ${
-                          tool === 'circle' || tool === 'square' || tool === 'triangle' || tool === 'hexagon'
+                        className={`p-1.5 sm:p-2 rounded-full transition-colors ${
+                          isShapeTool(tool)
                             ? 'bg-[#fb8500] text-white'
                             : 'hover:bg-gray-100 text-gray-800'
                         }`}
                         title="Shapes"
                       >
-                        <Shapes className="w-4 h-4" />
+                        <Shapes className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       </button>
                       {showShapesDropdown && (
                         <>
                           <div
-                            className="fixed inset-0 z-40"
+                            className="fixed inset-0 z-[100]"
                             onClick={() => setShowShapesDropdown(false)}
                           />
-                          <div className="absolute left-0 mt-1 w-48 bg-white rounded-lg shadow-lg z-50 scale-[0.8] origin-top-left">
+                          <div className="absolute left-0 mt-1 w-48 bg-white rounded-lg shadow-lg z-[101] scale-[0.8] origin-top-left">
                             {SHAPES.map((shape) => (
                               <button
                                 key={shape.id}
@@ -1181,62 +1319,77 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                   </div>
 
                   {/* Color and Size Controls */}
-                  <div className="flex items-center gap-2 sm:gap-3 border-l pl-2 sm:pl-3">
+                  <div className="flex items-center gap-1.5 sm:gap-3 border-l pl-2 sm:pl-3">
                     <input
                       type="color"
                       value={color}
                       onChange={(e) => setColor(e.target.value)}
-                      className="w-6 h-6 rounded cursor-pointer"
+                      className="w-5 h-5 sm:w-6 sm:h-6 rounded cursor-pointer"
                     />
                     <div className="flex flex-col">
-                      <label className="text-xs font-outfit text-gray-500">Stroke Size</label>
+                      <label className="text-[10px] sm:text-xs font-outfit text-gray-500">Stroke Size</label>
                       <input
                         type="range"
                         min="1"
                         max="20"
-                        value={brushSize}
-                        onChange={(e) => setBrushSize(parseInt(e.target.value))}
-                        className="w-20"
+                        value={strokeWidth}
+                        onChange={(e) => setStrokeWidth(parseInt(e.target.value))}
+                        className="w-16 sm:w-20"
                       />
                     </div>
                   </div>
                 </div>
 
                 {/* Right Section: Actions */}
-                <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+                <div className="flex items-center gap-1.5 sm:gap-3">
+                  {/* Mobile Actions */}
+                  <div className="flex items-center gap-1.5 lg:hidden">
+                    <button
+                      onClick={handleClear}
+                      className="p-1.5 sm:p-2 hover:bg-gray-100 rounded-full transition-colors"
+                      title="Clear canvas"
+                    >
+                      <Trash2 className="w-4 h-4 sm:w-5 sm:h-5 text-gray-800" />
+                    </button>
+                    <button
+                      onClick={() => setShowGuidePanel(true)}
+                      className="p-1.5 sm:p-2 hover:bg-gray-100 rounded-full transition-colors"
+                      title="Drawing Guide"
+                    >
+                      <Wand2 className="w-4 h-4 sm:w-5 sm:h-5 text-gray-800" />
+                    </button>
+                    <button
+                      onClick={handleAnimate}
+                      className="p-1.5 sm:p-2 hover:bg-gray-100 rounded-full transition-colors"
+                      title="Animate"
+                    >
+                      <Play className="w-4 h-4 sm:w-5 sm:h-5 text-gray-800" />
+                    </button>
+                  </div>
+
                   {/* Mobile Menu Button */}
-                  <div className="lg:hidden relative">
+                  <div className="lg:hidden">
                     <button
                       onClick={() => setShowMobileMenu(!showMobileMenu)}
-                      className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                      className="p-1.5 sm:p-2 hover:bg-gray-100 rounded-full transition-colors"
                       title="More options"
                     >
-                      <MoreVertical className="w-5 h-5 text-gray-800" />
+                      <MoreVertical className="w-4 h-4 sm:w-5 sm:h-5 text-gray-800" />
                     </button>
                     {showMobileMenu && (
                       <>
                         <div
-                          className="fixed inset-0 z-40"
+                          className="fixed inset-0 z-[100]"
                           onClick={() => setShowMobileMenu(false)}
                         />
-                        <div className="absolute right-0 mt-1 w-48 bg-white rounded-lg shadow-lg z-50 scale-[0.8] origin-top-right">
-                          <button
-                            onClick={() => {
-                              handleClear();
-                              setShowMobileMenu(false);
-                            }}
-                            className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 text-gray-700 first:rounded-t-lg text-sm"
-                          >
-                            <RotateCcw className="w-4 h-4" />
-                            <span>Refresh</span>
-                          </button>
+                        <div className="absolute right-0 top-[40px] mt-1 w-48 bg-white rounded-lg shadow-lg z-[101] scale-[0.8] origin-top-right">
                           <button
                             onClick={() => {
                               handleUndo();
                               setShowMobileMenu(false);
                             }}
                             disabled={currentStep === 0}
-                            className={`w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 text-gray-700 text-sm ${
+                            className={`w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 text-gray-700 first:rounded-t-lg text-sm ${
                               currentStep === 0 ? 'opacity-50 cursor-not-allowed' : ''
                             }`}
                           >
@@ -1258,29 +1411,6 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                           </button>
                           <button
                             onClick={() => {
-                              handleSave();
-                              setShowMobileMenu(false);
-                            }}
-                            className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 text-gray-700 text-sm"
-                          >
-                            <Save className="w-4 h-4" />
-                            <span>Save</span>
-                          </button>
-                          <button
-                            onClick={() => {
-                              setShowAnimationCategories(!showAnimationCategories);
-                              setShowMobileMenu(false);
-                            }}
-                            disabled={isAnimating}
-                            className={`w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 text-gray-700 text-sm ${
-                              isAnimating ? 'opacity-50 cursor-not-allowed' : ''
-                            }`}
-                          >
-                            <Play className="w-4 h-4" />
-                            <span>Animate</span>
-                          </button>
-                          <button
-                            onClick={() => {
                               handleShare();
                               setShowMobileMenu(false);
                             }}
@@ -1291,15 +1421,13 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                           </button>
                           <button
                             onClick={() => {
-                              setShowGrid(!showGrid);
+                              handleSave();
                               setShowMobileMenu(false);
                             }}
-                            className={`w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 text-gray-700 last:rounded-b-lg text-sm ${
-                              showGrid ? 'text-[#fb8500]' : ''
-                            }`}
+                            className="w-full flex items-center gap-2 px-4 py-2 text-left hover:bg-gray-100 text-gray-700 last:rounded-b-lg text-sm"
                           >
-                            <Grid className="w-4 h-4" />
-                            <span>Grid</span>
+                            <Download className="w-4 h-4" />
+                            <span>Save</span>
                           </button>
                         </div>
                       </>
@@ -1313,7 +1441,7 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                       className="p-2 hover:bg-gray-100 rounded-full transition-colors"
                       title="Clear canvas"
                     >
-                      <RotateCcw className="w-4 h-4 text-gray-800" />
+                      <Trash2 className="w-4 h-4 text-gray-800" />
                     </button>
                     <div className="h-6 w-px bg-gray-300" />
                     <button
@@ -1387,7 +1515,7 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                     {showShareMenu && shareImageUrl && (
                       <>
                         <div
-                          className="fixed inset-0 z-40"
+                          className="fixed inset-0 z-[101]"
                           onClick={() => setShowShareMenu(false)}
                         />
                         <ShareMenu
@@ -1414,24 +1542,41 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
               </div>
             </div>
 
-            {/* Drawing Area with Guide Panel - Responsive Layout */}
-            <div className="relative flex flex-col lg:flex-row gap-3 flex-1">
-              {/* Drawing Guide Panel */}
-              <div className="w-full lg:w-64 bg-gray-900 rounded-lg shadow-lg p-3 sm:p-4 font-outfit flex flex-col h-[300px] lg:h-[512px] min-w-0 lg:min-w-[256px]">
+            {/* Drawing Area Container - Flex grow and shrink properly */}
+            <div className="flex-1 flex flex-col lg:flex-row gap-2 sm:gap-3 min-h-0 overflow-hidden">
+              {/* Drawing Guide Panel - Fixed height on mobile, flexible on desktop */}
+              <div className={`
+                ${showGuidePanel ? 'block' : 'hidden'} 
+                lg:block w-full lg:w-64 
+                bg-gray-900 rounded-lg shadow-lg 
+                p-3 sm:p-4 
+                font-outfit 
+                flex flex-col 
+                h-[400px] lg:h-[512px] 
+                min-w-0 lg:min-w-[256px]
+                ${showGuidePanel ? 'fixed inset-x-2 top-2 z-[90] lg:relative lg:inset-auto lg:top-auto' : ''}
+              `}>
                 <div className="flex justify-between items-center mb-2 sm:mb-3">
                   <h3 className="text-base sm:text-lg font-semibold font-outfit text-white">Drawing Guide</h3>
+                  {/* Add close button for mobile */}
+                  <button
+                    onClick={() => setShowGuidePanel(false)}
+                    className="lg:hidden p-1.5 sm:p-2 hover:bg-gray-700 rounded-full transition-colors"
+                  >
+                    <X className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
+                  </button>
                 </div>
 
                 {/* Guide Content */}
                 <div className="flex-1 flex flex-col">
                   <div className="border-b border-gray-700 pb-2 sm:pb-3">
-                    <p className="text-sm text-gray-300 font-outfit text-[0.8rem]">
+                    <p className="text-xs sm:text-sm text-gray-300 font-outfit">
                       Create your own cartoon-style drawings with our AI-powered guide. Choose a style or upload a reference image to get started.
                     </p>
                   </div>
                 
                   {/* Guide Mode Selection */}
-                  <div className="space-y-2 mt-3 mb-4">
+                  <div className="space-y-2 mt-2 sm:mt-3 mb-3 sm:mb-4">
                     <button
                       onClick={() => setGuideMode('generate')}
                       className={`w-full flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm ${
@@ -1602,9 +1747,15 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                 </div>
               </div>
 
-              {/* Main Drawing Area */}
-              <div className="flex-1 h-[512px] w-full lg:w-[512px] relative">
-                {/* Canvas Container */}
+              {/* Main Drawing Area - Flex grow and maintain aspect ratio */}
+              <div className={`
+                flex-1 
+                ${showGuidePanel ? 'h-[calc(100vh-450px)]' : 'h-[calc(100vh-120px)]'} 
+                sm:h-[500px] lg:h-[512px] 
+                ${showGuidePanel ? 'w-full' : 'w-full lg:w-[512px]'} 
+                relative
+              `}>
+                {/* Canvas Container - Full size of parent */}
                 <div ref={containerRef} className="w-full h-full relative">
                   <Stage
                     width={containerSize.width}
@@ -1650,7 +1801,7 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                         />
                       )}
                       {lines.map((line, i) => {
-                        if (line.tool === 'brush' || line.tool === 'eraser') {
+                        if (isDrawingLine(line)) {
                           return (
                             <Line
                               key={`drawing-line-${i}`}
@@ -1665,7 +1816,7 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                               }
                             />
                           );
-                        } else if (line.shapeProps) {
+                        } else if (isShapeLine(line)) {
                           return (
                             <React.Fragment key={`shape-${i}`}>
                               {renderShape(line)}
@@ -1677,11 +1828,11 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                       {isDrawing && shape && (
                         <React.Fragment key="current-shape">
                           {shape.type === 'circle' && (
-                            <KonvaCircle
+                            <Circle
                               key="current-circle"
                               x={shape.x}
                               y={shape.y}
-                              radius={shape.radius}
+                              radius={Math.abs(shape.width || 0) / 2}
                               stroke={color}
                               strokeWidth={brushSize}
                               draggable={false}
@@ -1692,8 +1843,8 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                               key="current-square"
                               x={shape.x}
                               y={shape.y}
-                              width={shape.width}
-                              height={shape.height}
+                              width={shape.width || 0}
+                              height={shape.height || 0}
                               stroke={color}
                               strokeWidth={brushSize}
                               draggable={false}
@@ -1702,12 +1853,10 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                           {shape.type === 'triangle' && (
                             <Line
                               key="current-triangle"
-                              points={shape.points}
+                              points={shape.points || []}
                               stroke={color}
                               strokeWidth={brushSize}
                               closed={true}
-                              tension={0}
-                              draggable={false}
                             />
                           )}
                           {shape.type === 'hexagon' && (
@@ -1715,8 +1864,8 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                               key="current-hexagon"
                               x={shape.x}
                               y={shape.y}
-                              radius={shape.radius}
                               sides={6}
+                              radius={shape.radius || 0}
                               stroke={color}
                               strokeWidth={brushSize}
                               draggable={false}
@@ -1732,14 +1881,14 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
           </div>
         </div>
 
-        {/* Floating Buy Me a Coffee Button */}
+        {/* Buy Me a Coffee Button - Fixed position */}
         <a
           href="https://www.buymeacoffee.com/locodomo"
           target="_blank"
           rel="noopener noreferrer"
-          className="fixed bottom-4 right-4 flex items-center gap-2 px-4 py-2 bg-[#2196F3] hover:bg-[#1976D2] text-white rounded-full shadow-lg transition-colors z-50"
+          className="fixed bottom-4 right-4 flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-1.5 sm:py-2 bg-[#2196F3] hover:bg-[#1976D2] text-white rounded-full shadow-lg transition-colors z-[100] text-sm sm:text-base"
         >
-          <Coffee className="h-4 w-4" />
+          <Coffee className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
           <span className="font-outfit">Buy me a coffee</span>
         </a>
 
@@ -1788,7 +1937,7 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
                     className="p-2 hover:bg-gray-100 rounded-full transition-colors"
                   >
                     <svg className="w-5 h-5 text-[#1DA1F2]" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M23.953 4.57a10 10 0 01-2.825.775 4.958 4.958 0 002.163-2.723c-.951.555-2.005.959-3.127 1.184a4.92 4.92 0 00-8.384 4.482C7.69 8.095 4.067 6.13 1.64 3.162a4.822 4.822 0 00-.666 2.475c0 1.71.87 3.213 2.188 4.096a4.904 4.904 0 01-2.228-.616v.06a4.923 4.923 0 003.946 4.827 4.996 4.996 0 01-2.212.085 4.936 4.936 0 004.604 3.417 9.867 9.867 0 01-6.102 2.105c-.39 0-.779-.023-1.17-.067a13.995 13.995 0 007.557 2.209c9.053 0 13.998-7.496 13.998-13.985 0-.21 0-.42-.015-.63A9.935 9.935 0 0024 4.59z"/>
+                      <path d="M23.953 4.57a10 10 0 01-2.825.775 4.958 4.958 0 002.163-2.723c-.951.555-2.005.959-3.127 1.184a4.92 4.92 0 00-8.384 4.482C7.69 8.095 4.067 6.13 1.64 3.162a4.822 4.822 0 00-.666 2.475c0 1.71.87 3.213 2.188 4.096a4.904 4.904 0 01-2.228-.616v.06a4.923 4.923 0 004.604 3.417 4.996 4.996 0 01-2.212.085 4.936 4.936 0 004.604 3.417 9.867 9.867 0 01-6.102 2.105c-.39 0-.779-.023-1.17-.067a13.995 13.995 0 007.557 2.209c9.053 0 13.998-7.496 13.998-13.985 0-.21 0-.42-.015-.63A9.935 9.935 0 0024 4.59z"/>
                     </svg>
                   </button>
                   <button 
@@ -1814,6 +1963,6 @@ const DrawingBoard: React.FC<DrawingBoardProps> = () => {
       </div>
     </div>
   );
-};
+}
 
-export default DrawingBoard; 
+export default DrawingBoard;

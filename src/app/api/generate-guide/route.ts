@@ -10,8 +10,9 @@ const openai = new OpenAI({
 // Define request schema
 const requestSchema = z.object({
   type: z.string().optional(),
-  character: z.string().optional()
-}).optional().default({});
+  character: z.string().optional(),
+  style: z.string().optional()
+}).default({});
 
 const CHARACTER_TYPES = [
   "a cheerful anime girl with short hair and school uniform",
